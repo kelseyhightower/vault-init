@@ -156,7 +156,7 @@ func initialize() {
 	}
 
 	if response.StatusCode != 200 {
-		log.Printf("Non 200 status code: %s", response.StatusCode)
+		log.Printf("Non 200 status code: %d", response.StatusCode)
 		return
 	}
 
