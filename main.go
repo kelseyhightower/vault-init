@@ -103,6 +103,7 @@ func main() {
 			time.Sleep(checkIntervalDuration)
 			continue
 		}
+		response.Body.Close()
 
 		switch response.StatusCode {
 		case 200:
