@@ -97,7 +97,7 @@ func main() {
 	}
 
 	for {
-		response, err := httpClient.Get("https://127.0.0.1:8200/v1/sys/health")
+		response, err := httpClient.Head("https://127.0.0.1:8200/v1/sys/health")
 		if err != nil {
 			log.Println(err)
 			time.Sleep(checkIntervalDuration)
@@ -154,6 +154,7 @@ func initialize() {
 		log.Println(err)
 		return
 	}
+	defer response.Body.Close()
 
 	if response.StatusCode != 200 {
 		log.Printf("Non 200 status code: %s", response.StatusCode)
@@ -317,6 +318,7 @@ func unseal() {
 			log.Println(err)
 			break
 		}
+		defer response.Body.Close()
 
 		var unsealResponse UnsealResponse
 		if err := json.Unmarshal(unsealRequestResponseBody, &unsealResponse); err != nil {
