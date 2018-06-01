@@ -156,7 +156,7 @@ func initialize() {
 	}
 
 	if response.StatusCode != 200 {
-		log.Printf("Non 200 status code: %s", response.StatusCode)
+		log.Printf("initialize(): Non 200 status code: %s", response.StatusCode)
 		return
 	}
 
@@ -308,7 +308,7 @@ func unseal() {
 		}
 
 		if response.StatusCode != 200 {
-			log.Printf("Non 200 status code: %s", response.StatusCode)
+			log.Printf("unseal(): Non 200 status code: %s", response.StatusCode)
 			break
 		}
 
