@@ -1,4 +1,4 @@
-FROM golang:1.10.1
+FROM golang:1.10.2
 WORKDIR /go/src/app
 COPY . .
 RUN CGO_ENABLE=0 GOOS=linux go build -o vault-init -v .
