@@ -15,7 +15,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"runtime"
 	"strconv"
+	"syscall"
 	"time"
 
 	"cloud.google.com/go/storage"
@@ -125,7 +128,26 @@ func main() {
 		},
 	}
 
+	signalCh := make(chan os.Signal)
+	signal.Notify(signalCh,
+		syscall.SIGINT,
+		syscall.SIGTERM,
+		syscall.SIGKILL,
+	)
+
+	stop := func() {
+		log.Printf("Shutting down")
+		kmsCtxCancel()
+		storageCtxCancel()
+		os.Exit(0)
+	}
+
 	for {
+		select {
+		case <-signalCh:
+			stop()
+		default:
+		}
 		response, err := httpClient.Head(vaultAddr + "/v1/sys/health")
 
 		if response != nil && response.Body != nil {
@@ -155,7 +177,12 @@ func main() {
 		}
 
 		log.Printf("Next check in %s", checkIntervalDuration)
-		time.Sleep(checkIntervalDuration)
+
+		select {
+		case <-signalCh:
+			stop()
+		case <-time.After(checkIntervalDuration):
+		}
 	}
 }
 
