@@ -27,3 +27,29 @@ CHECK_INTERVAL="300"
 GCS_BUCKET_NAME="vault-storage"
 KMS_KEY_ID="projects/my-project/locations/global/keyRings/my-keyring/cryptoKeys/key"
 ```
+
+### IAM &amp; Permissions
+
+The `vault-init` service uses the official Google Cloud Golang SDK. This means
+it supports the common ways of [providing credentials to GCP][cloud-creds].
+
+To use this service, the service account must have the following minimum
+scope(s):
+
+```text
+https://www.googleapis.com/auth/cloudkms
+https://www.googleapis.com/auth/devstorage.read_write
+```
+
+Additionally, the service account must have the following minimum role(s):
+
+```text
+roles/cloudkms.cryptoKeyEncrypterDecrypter
+roles/storage.objectAdmin OR roles/storage.legacyBucketWriter
+```
+
+For more information on service accounts, please see the
+[Google Cloud Service Accounts documentation][service-accounts].
+
+[cloud-creds]: https://cloud.google.com/docs/authentication/production#providing_credentials_to_your_application
+[service-accounts]: https://cloud.google.com/compute/docs/access/service-accounts
