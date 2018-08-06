@@ -115,7 +115,10 @@ func main() {
 
 	storageCtx, storageCtxCancel := context.WithCancel(context.Background())
 	defer storageCtxCancel()
-	storageClient, err = storage.NewClient(storageCtx, option.WithUserAgent(userAgent))
+	storageClient, err = storage.NewClient(storageCtx,
+		option.WithUserAgent(userAgent),
+		option.WithScopes(storage.ScopeReadWrite),
+	)
 	if err != nil {
 		log.Fatal(err)
 	}
