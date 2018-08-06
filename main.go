@@ -20,7 +20,8 @@ import (
 
 	"cloud.google.com/go/storage"
 	"golang.org/x/oauth2/google"
-	cloudkms "google.golang.org/api/cloudkms/v1"
+	"google.golang.org/api/cloudkms/v1"
+	"google.golang.org/api/option"
 )
 
 var (
@@ -28,8 +29,13 @@ var (
 	checkInterval string
 	gcsBucketName string
 	httpClient    http.Client
-	kmsKeyId      string
+
+	kmsService *cloudkms.Service
+	kmsKeyId   string
+
 	storageClient *storage.Client
+
+	userAgent = fmt.Sprintf("vault-init/0.1.0 (%s)", runtime.Version())
 )
 
 // InitRequest holds a Vault init request.
@@ -89,8 +95,24 @@ func main() {
 		log.Fatal("KMS_KEY_ID must be set and not empty")
 	}
 
-	ctx := context.Background()
-	storageClient, err = storage.NewClient(ctx)
+	kmsCtx, kmsCtxCancel := context.WithCancel(context.Background())
+	defer kmsCtxCancel()
+	kmsClient, err := google.DefaultClient(kmsCtx, "https://www.googleapis.com/auth/cloudkms")
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	kmsService, err = cloudkms.New(kmsClient)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+	kmsService.UserAgent = userAgent
+
+	storageCtx, storageCtxCancel := context.WithCancel(context.Background())
+	defer storageCtxCancel()
+	storageClient, err = storage.NewClient(storageCtx, option.WithUserAgent(userAgent))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -181,19 +203,6 @@ func initialize() {
 		return
 	}
 
-	ctx := context.Background()
-	googleDefaultClient, err := google.DefaultClient(ctx, cloudkms.CloudPlatformScope)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	kmsService, err := cloudkms.New(googleDefaultClient)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
 	log.Println("Encrypting unseal keys and the root token...")
 
 	rootTokenEncryptRequest := &cloudkms.EncryptRequest{
@@ -219,7 +228,7 @@ func initialize() {
 	bucket := storageClient.Bucket(gcsBucketName)
 
 	// Save the encrypted unseal keys.
-	ctx = context.Background()
+	ctx := context.Background()
 	unsealKeysObject := bucket.Object("unseal-keys.json.enc").NewWriter(ctx)
 	defer unsealKeysObject.Close()
 
@@ -257,19 +266,6 @@ func unseal() {
 	defer unsealKeysObject.Close()
 
 	unsealKeysData, err := ioutil.ReadAll(unsealKeysObject)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	ctx = context.Background()
-	googleDefaultClient, err := google.DefaultClient(ctx, cloudkms.CloudPlatformScope)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	kmsService, err := cloudkms.New(googleDefaultClient)
 	if err != nil {
 		log.Println(err)
 		return
