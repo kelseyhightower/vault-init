@@ -1,3 +1,5 @@
+**This repository is deprecated. Please ues the [open source auto unsealer](https://www.vaultproject.io/docs/configuration/seal/gcpckms.html) instead.**
+
 # vault-init
 
 The `vault-init` service automates the process of [initializing](https://www.vaultproject.io/docs/commands/operator/init.html) and [unsealing](https://www.vaultproject.io/docs/concepts/seal.html#unsealing) HashiCorp Vault instances running on [Google Cloud Platform](https://cloud.google.com).
