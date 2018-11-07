@@ -1,0 +1,9 @@
+FROM golang:alpine3.8
+WORKDIR /go/src/app
+COPY . .
+RUN CGO_ENABLE=0 GOOS=linux go build -o vault-init -v .
+
+FROM alpine:3.8
+COPY --from=0 /go/src/app/vault-init .
+RUN apk add --no-cache ca-certificates
+ENTRYPOINT ["/vault-init"]

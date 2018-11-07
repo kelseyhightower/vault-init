@@ -70,6 +70,8 @@ spec:
                   key: api-addr
             - name: "VAULT_CLUSTER_ADDR"
               value: "https://$(POD_IP):8201"
+            - name: CLOUD_SERVICE
+              value: "GCP"
           args:
             - "server"
             - "-config=/etc/vault/config/vault.hcl"

@@ -18,8 +18,15 @@ import (
 	"os/signal"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
+
+	"github.com/aws/aws-sdk-go/aws"
+
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/kms"
+	"github.com/aws/aws-sdk-go/service/s3"
 
 	"cloud.google.com/go/storage"
 	"golang.org/x/oauth2/google"
@@ -28,17 +35,22 @@ import (
 )
 
 var (
-	vaultAddr     string
-	checkInterval string
-	gcsBucketName string
-	httpClient    http.Client
-
-	kmsService *cloudkms.Service
-	kmsKeyId   string
-
-	storageClient *storage.Client
+	vaultAddr         string
+	checkInterval     string
+	gcsBucketName     string
+	s3BucketName      string
+	httpClient        http.Client
+	kmsKeyId          string
+	prefix            string
+	unsealKeyFilePath string
+	rootTokenFilePath string
 
 	userAgent = fmt.Sprintf("vault-init/0.1.0 (%s)", runtime.Version())
+)
+
+const (
+	unsealKeyFileName = "unseal-keys.json.enc"
+	rootTokenFileName = "root-token.enc"
 )
 
 // InitRequest holds a Vault init request.
@@ -49,7 +61,6 @@ type InitRequest struct {
 
 // InitResponse holds a Vault init response.
 type InitResponse struct {
-	Keys       []string `json:"keys"`
 	KeysBase64 []string `json:"keys_base64"`
 	RootToken  string   `json:"root_token"`
 }
@@ -66,6 +77,26 @@ type UnsealResponse struct {
 	T        int  `json:"t"`
 	N        int  `json:"n"`
 	Progress int  `json:"progress"`
+}
+
+// GCPService holds the GCP KMS Service and Storage Client objects.
+type GCPService struct {
+	kmsService    *cloudkms.Service
+	storageClient *storage.Client
+}
+
+// AWSService holds the AWS KMS Service and S3 Storage Client objects.
+type AWSService struct {
+	kmsService     *kms.KMS
+	s3Client       *s3.S3
+	kmsContext     context.Context
+	storageContext context.Context
+}
+
+// Service defines the functions a service must implement
+type Service interface {
+	Initialize()
+	Unseal()
 }
 
 func main() {
@@ -88,9 +119,9 @@ func main() {
 
 	checkIntervalDuration := time.Duration(i) * time.Second
 
-	gcsBucketName = os.Getenv("GCS_BUCKET_NAME")
-	if gcsBucketName == "" {
-		log.Fatal("GCS_BUCKET_NAME must be set and not empty")
+	svcType := strings.ToLower(os.Getenv("CLOUD_SERVICE"))
+	if svcType != "aws" && svcType != "gcp" {
+		log.Fatalf("CLOUD_SERVICE is invalid, allowed values: GCP, AWS")
 	}
 
 	kmsKeyId = os.Getenv("KMS_KEY_ID")
@@ -98,29 +129,71 @@ func main() {
 		log.Fatal("KMS_KEY_ID must be set and not empty")
 	}
 
+	prefix = os.Getenv("PREFIX")
+	if prefix != "" {
+		unsealKeyFilePath = fmt.Sprintf("%s/%s", prefix, unsealKeyFileName)
+		rootTokenFilePath = fmt.Sprintf("%s/%s", prefix, rootTokenFileName)
+	} else {
+		unsealKeyFilePath = unsealKeyFileName
+		rootTokenFilePath = rootTokenFileName
+	}
+
+	// Create our client and storage contexts
 	kmsCtx, kmsCtxCancel := context.WithCancel(context.Background())
 	defer kmsCtxCancel()
-	kmsClient, err := google.DefaultClient(kmsCtx, "https://www.googleapis.com/auth/cloudkms")
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	kmsService, err = cloudkms.New(kmsClient)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-	kmsService.UserAgent = userAgent
-
 	storageCtx, storageCtxCancel := context.WithCancel(context.Background())
 	defer storageCtxCancel()
-	storageClient, err = storage.NewClient(storageCtx,
-		option.WithUserAgent(userAgent),
-		option.WithScopes(storage.ScopeReadWrite),
-	)
-	if err != nil {
-		log.Fatal(err)
+
+	var service Service
+
+	if svcType == "gcp" {
+		log.Println("Using GCP Environment")
+		gcsBucketName = os.Getenv("GCS_BUCKET_NAME")
+		if gcsBucketName == "" {
+			log.Fatal("GCS_BUCKET_NAME must be set and not empty")
+		}
+		kmsClient, err := google.DefaultClient(kmsCtx, "https://www.googleapis.com/auth/cloudkms")
+		if err != nil {
+			log.Println(err)
+			return
+		}
+
+		gcpKmsService, err := cloudkms.New(kmsClient)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+		gcpKmsService.UserAgent = userAgent
+
+		storageClient, err := storage.NewClient(storageCtx,
+			option.WithUserAgent(userAgent),
+			option.WithScopes(storage.ScopeReadWrite),
+		)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		service = &GCPService{
+			kmsService:    gcpKmsService,
+			storageClient: storageClient,
+		}
+	} else {
+		log.Println("Using AWS Environment")
+		s3BucketName = os.Getenv("S3_BUCKET_NAME")
+		if s3BucketName == "" {
+			log.Fatal("S3_BUCKET_NAME must be set and not empty ")
+		}
+		sess, err := session.NewSession()
+		if err != nil {
+			log.Fatalf("Error creating AWS Session: %s", err)
+		}
+
+		service = &AWSService{
+			kmsService:     kms.New(sess),
+			s3Client:       s3.New(sess),
+			kmsContext:     kmsCtx,
+			storageContext: storageCtx,
+		}
 	}
 
 	httpClient = http.Client{
@@ -154,7 +227,9 @@ func main() {
 		response, err := httpClient.Head(vaultAddr + "/v1/sys/health")
 
 		if response != nil && response.Body != nil {
-			response.Body.Close()
+			if err := response.Body.Close(); err != nil {
+				log.Fatalf("Error closing response body: %s", err)
+			}
 		}
 
 		if err != nil {
@@ -170,11 +245,11 @@ func main() {
 			log.Println("Vault is unsealed and in standby mode.")
 		case 501:
 			log.Println("Vault is not initialized. Initializing and unsealing...")
-			initialize()
-			unseal()
+			service.Initialize()
+			service.Unseal()
 		case 503:
 			log.Println("Vault is sealed. Unsealing...")
-			unseal()
+			service.Unseal()
 		default:
 			log.Printf("Vault is in an unknown state. Status code: %d", response.StatusCode)
 		}
@@ -189,7 +264,7 @@ func main() {
 	}
 }
 
-func initialize() {
+func (s *GCPService) Initialize() {
 	initRequest := InitRequest{
 		SecretShares:    5,
 		SecretThreshold: 3,
@@ -239,7 +314,7 @@ func initialize() {
 		Plaintext: base64.StdEncoding.EncodeToString([]byte(initResponse.RootToken)),
 	}
 
-	rootTokenEncryptResponse, err := kmsService.Projects.Locations.KeyRings.CryptoKeys.Encrypt(kmsKeyId, rootTokenEncryptRequest).Do()
+	rootTokenEncryptResponse, err := s.kmsService.Projects.Locations.KeyRings.CryptoKeys.Encrypt(kmsKeyId, rootTokenEncryptRequest).Do()
 	if err != nil {
 		log.Println(err)
 		return
@@ -249,17 +324,17 @@ func initialize() {
 		Plaintext: base64.StdEncoding.EncodeToString(initRequestResponseBody),
 	}
 
-	unsealKeysEncryptResponse, err := kmsService.Projects.Locations.KeyRings.CryptoKeys.Encrypt(kmsKeyId, unsealKeysEncryptRequest).Do()
+	unsealKeysEncryptResponse, err := s.kmsService.Projects.Locations.KeyRings.CryptoKeys.Encrypt(kmsKeyId, unsealKeysEncryptRequest).Do()
 	if err != nil {
 		log.Println(err)
 		return
 	}
 
-	bucket := storageClient.Bucket(gcsBucketName)
+	bucket := s.storageClient.Bucket(gcsBucketName)
 
 	// Save the encrypted unseal keys.
 	ctx := context.Background()
-	unsealKeysObject := bucket.Object("unseal-keys.json.enc").NewWriter(ctx)
+	unsealKeysObject := bucket.Object(unsealKeyFilePath).NewWriter(ctx)
 	defer unsealKeysObject.Close()
 
 	_, err = unsealKeysObject.Write([]byte(unsealKeysEncryptResponse.Ciphertext))
@@ -267,10 +342,10 @@ func initialize() {
 		log.Println(err)
 	}
 
-	log.Printf("Unseal keys written to gs://%s/%s", gcsBucketName, "unseal-keys.json.enc")
+	log.Printf("Unseal keys written to gs://%s/%s", gcsBucketName, unsealKeyFilePath)
 
 	// Save the encrypted root token.
-	rootTokenObject := bucket.Object("root-token.enc").NewWriter(ctx)
+	rootTokenObject := bucket.Object(rootTokenFilePath).NewWriter(ctx)
 	defer rootTokenObject.Close()
 
 	_, err = rootTokenObject.Write([]byte(rootTokenEncryptResponse.Ciphertext))
@@ -278,16 +353,16 @@ func initialize() {
 		log.Println(err)
 	}
 
-	log.Printf("Root token written to gs://%s/%s", gcsBucketName, "root-token.enc")
+	log.Printf("Root token written to gs://%s/%s", gcsBucketName, rootTokenFilePath)
 
 	log.Println("Initialization complete.")
-}
 
-func unseal() {
-	bucket := storageClient.Bucket(gcsBucketName)
+}
+func (s *GCPService) Unseal() {
+	bucket := s.storageClient.Bucket(gcsBucketName)
 
 	ctx := context.Background()
-	unsealKeysObject, err := bucket.Object("unseal-keys.json.enc").NewReader(ctx)
+	unsealKeysObject, err := bucket.Object(unsealKeyFilePath).NewReader(ctx)
 	if err != nil {
 		log.Println(err)
 		return
@@ -305,7 +380,7 @@ func unseal() {
 		Ciphertext: string(unsealKeysData),
 	}
 
-	unsealKeysDecryptResponse, err := kmsService.Projects.Locations.KeyRings.CryptoKeys.Decrypt(kmsKeyId, unsealKeysDecryptRequest).Do()
+	unsealKeysDecryptResponse, err := s.kmsService.Projects.Locations.KeyRings.CryptoKeys.Decrypt(kmsKeyId, unsealKeysDecryptRequest).Do()
 	if err != nil {
 		log.Println(err)
 		return
@@ -320,6 +395,149 @@ func unseal() {
 	}
 
 	if err := json.Unmarshal(unsealKeysPlaintext, &initResponse); err != nil {
+		log.Println(err)
+		return
+	}
+
+	for _, key := range initResponse.KeysBase64 {
+		done, err := unsealOne(key)
+		if done {
+			return
+		}
+
+		if err != nil {
+			log.Println(err)
+			return
+		}
+	}
+}
+
+func (s *AWSService) Initialize() {
+	initRequest := InitRequest{
+		SecretShares:    5,
+		SecretThreshold: 3,
+	}
+
+	initRequestData, err := json.Marshal(&initRequest)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	r := bytes.NewReader(initRequestData)
+	request, err := http.NewRequest("PUT", vaultAddr+"/v1/sys/init", r)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	response, err := httpClient.Do(request)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+	defer response.Body.Close()
+
+	initRequestResponseBody, err := ioutil.ReadAll(response.Body)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	if response.StatusCode != 200 {
+		log.Printf("init: non 200 status code: %d", response.StatusCode)
+		return
+	}
+
+	var initResponse InitResponse
+
+	if err := json.Unmarshal(initRequestResponseBody, &initResponse); err != nil {
+		log.Println(err)
+		return
+	}
+
+	log.Println("Encrypting unseal keys and the root token...")
+
+	rootTokenEncryptInput := &kms.EncryptInput{
+		Plaintext: []byte(initResponse.RootToken),
+		KeyId:     &kmsKeyId,
+	}
+	rootTokenEncryptOutput, err := s.kmsService.EncryptWithContext(s.kmsContext, rootTokenEncryptInput)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	unsealKeysEncryptInput := &kms.EncryptInput{
+		Plaintext: []byte(initRequestResponseBody),
+		KeyId:     &kmsKeyId,
+	}
+	unsealKeysEncryptOutput, err := s.kmsService.EncryptWithContext(s.kmsContext, unsealKeysEncryptInput)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	// Write the Unseal Keys to S3
+	putUnsealKeysInput := &s3.PutObjectInput{
+		Key:    aws.String(unsealKeyFilePath),
+		Bucket: &s3BucketName,
+		Body:   bytes.NewReader(unsealKeysEncryptOutput.CiphertextBlob),
+	}
+
+	_, err = s.s3Client.PutObjectWithContext(s.storageContext, putUnsealKeysInput)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+	log.Printf("Unseal keys written to s3://%s/%s", s3BucketName, unsealKeyFilePath)
+
+	// Write the Root Token to S3
+	putRootTokenInput := &s3.PutObjectInput{
+		Key:    aws.String(rootTokenFilePath),
+		Bucket: &s3BucketName,
+		Body:   bytes.NewReader(rootTokenEncryptOutput.CiphertextBlob),
+	}
+
+	_, err = s.s3Client.PutObjectWithContext(s.storageContext, putRootTokenInput)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	log.Printf("Root token written to s3://%s/%s", s3BucketName, rootTokenFilePath)
+
+	log.Println("Initialization complete.")
+
+}
+func (s *AWSService) Unseal() {
+
+	getObjectInput := &s3.GetObjectInput{
+		Bucket: &s3BucketName,
+		Key:    aws.String(unsealKeyFilePath),
+	}
+	getObjectOutput, err := s.s3Client.GetObjectWithContext(s.storageContext, getObjectInput)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+	defer getObjectOutput.Body.Close()
+	unsealKeysData, err := ioutil.ReadAll(getObjectOutput.Body)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	kmsDecryptInput := &kms.DecryptInput{
+		CiphertextBlob: unsealKeysData,
+	}
+	unsealKeysPlaintext, err := s.kmsService.DecryptWithContext(s.kmsContext, kmsDecryptInput)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+	var initResponse InitResponse
+	if err := json.Unmarshal(unsealKeysPlaintext.Plaintext, &initResponse); err != nil {
 		log.Println(err)
 		return
 	}
