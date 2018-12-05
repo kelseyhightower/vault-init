@@ -124,6 +124,7 @@ func main() {
 	}
 
 	httpClient = http.Client{
+		IdleConnTimeout: 300 * time.Second,
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
 				InsecureSkipVerify: true,
@@ -153,7 +154,7 @@ func main() {
 		}
 		response, err := httpClient.Head(vaultAddr + "/v1/sys/health")
 
-		if response != nil && response.Body != nil {
+		if response != nil {
 			response.Body.Close()
 		}
 
