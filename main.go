@@ -124,8 +124,8 @@ func main() {
 	}
 
 	httpClient = http.Client{
-		IdleConnTimeout: 300 * time.Second,
 		Transport: &http.Transport{
+			IdleConnTimeout: 300 * time.Second,
 			TLSClientConfig: &tls.Config{
 				InsecureSkipVerify: true,
 			},
