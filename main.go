@@ -43,8 +43,10 @@ var (
 
 // InitRequest holds a Vault init request.
 type InitRequest struct {
-	SecretShares    int `json:"secret_shares"`
-	SecretThreshold int `json:"secret_threshold"`
+	SecretShares      int `json:"secret_shares"`
+	SecretThreshold   int `json:"secret_threshold"`
+	RecoveryShares    int `json:"recovery_shares"`
+	RecoveryThreshold int `json:"recovery_threshold"`
 }
 
 // InitResponse holds a Vault init response.
@@ -191,8 +193,10 @@ func main() {
 
 func initialize() {
 	initRequest := InitRequest{
-		SecretShares:    5,
-		SecretThreshold: 3,
+		SecretShares:      5,
+		SecretThreshold:   3,
+		RecoveryShares:    5,
+		RecoveryThreshold: 3,
 	}
 
 	initRequestData, err := json.Marshal(&initRequest)
